@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,17 @@ func getConfig(cfg string) (*rest.Config, error) {
 		return rest.InClusterConfig()
 	}
 	return clientcmd.BuildConfigFromFlags("", cfg)
+}
+
+type patchStringValue struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value string `json:"value"`
+}
+
+type patchString struct {
+	Op   string `json:"op"`
+	Path string `json:"path"`
 }
 
 func newClientset(filename string) (*kubernetes.Clientset, error) {
@@ -76,6 +88,7 @@ func main() {
 	const configmapName = "scaleway-k8s-node-coffee"
 
 	const excludeExternalLoadBalancerlabelKey = "node.kubernetes.io/exclude-from-external-load-balancers"
+	const excludeExternalLoadBalancerlabelKeyEscaped = "node.kubernetes.io~1exclude-from-external-load-balancers"
 	const excludeExternalLoadBalancerlabelValue = "true"
 
 	if coffee_namespace == nil || *coffee_namespace == "" {
@@ -88,12 +101,6 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatal("failed to connect to cluster")
 	}
-
-	//nodes, err := clientSet.CoreV1().Nodes().List(ctx, v1.ListOptions{})
-	//if err != nil {
-	//	log.WithError(err).Fatal("failed to connect to cluster")
-	//}
-
 
 	configmap, err := clientSet.CoreV1().ConfigMaps(*coffee_namespace).Get(ctx, configmapName, v1.GetOptions{})
 	if err != nil {
@@ -126,20 +133,26 @@ func main() {
 					log.Info("node: " + newNode.Name + " added  label reserved-ip")
 				}
 			}
+
 			newExternalIp, newErr := getExternalIp(*newNode)
-			if oldErr == nil &&  newErr == nil {
+			if oldErr == nil && newErr == nil {
 				if oldExternalIp != newExternalIp {
 					log.Info("node: " + newNode.Name + " ip changed: " + oldExternalIp + " > " + newExternalIp)
 				} else {
+
 					if contains(reservedIps, oldExternalIp) {
 						log.Debug("node: " + newNode.Name + " ip is still the same: " + newExternalIp + " and part of reserved ip pool")
 
 						if _, ok := newNode.Labels[excludeExternalLoadBalancerlabelKey]; ok {
 							log.Info("allowing node: " + newNode.Name + " to join Load Balancer backend pool")
-							labelPatch := fmt.Sprintf(`[
-								{"op":"remove","path":"/metadata/labels/%s" }
-							]`, excludeExternalLoadBalancerlabelKey)
-							_, err = clientSet.CoreV1().Nodes().Patch(ctx, newNode.Name, types.JSONPatchType, []byte(labelPatch), v1.PatchOptions{})
+
+							payload := []patchString{{
+								Op:   "remove",
+								Path: fmt.Sprintf("/metadata/labels/%s", excludeExternalLoadBalancerlabelKeyEscaped),
+							}}
+							payloadBytes, _ := json.Marshal(payload)
+							_, err = clientSet.CoreV1().Nodes().Patch(ctx, newNode.Name, types.JSONPatchType, []byte(payloadBytes), v1.PatchOptions{})
+
 							if err != nil {
 								fmt.Println(err)
 							}
@@ -151,15 +164,17 @@ func main() {
 
 						} else {
 							log.Info("Excluding this node: " + newNode.Name + " from External Load Balancer")
-							labelPatch := fmt.Sprintf(`[{"op":"add","path":"/metadata/labels/%s","value":"%s" }]`, excludeExternalLoadBalancerlabelKey, excludeExternalLoadBalancerlabelValue)
-							_, err = clientSet.CoreV1().Nodes().Patch(ctx, newNode.Name, types.JSONPatchType, []byte(labelPatch), v1.PatchOptions{
-								TypeMeta:     v1.TypeMeta{},
-								DryRun:       nil,
-								Force:        nil,
-								FieldManager: "",
-							})
+							payload := []patchStringValue{{
+								Op:    "add",
+								Path:  fmt.Sprintf("/metadata/labels/%s", excludeExternalLoadBalancerlabelKeyEscaped),
+								Value: excludeExternalLoadBalancerlabelValue,
+							}}
+							payloadBytes, _ := json.Marshal(payload)
+							_, err = clientSet.CoreV1().Nodes().Patch(ctx, newNode.Name, types.JSONPatchType, []byte(payloadBytes), v1.PatchOptions{})
+							if err != nil {
+								fmt.Println(err)
+							}
 						}
-
 
 					}
 				}
